@@ -1,0 +1,62 @@
+resources:
+- name: alpine
+  type: docker-image
+  icon: docker
+  source:
+    repository: alpine  
+
+jobs:   
+- name: speedtest
+  plan:
+  - get: alpine
+    params: {save: true}
+
+  - task: make-speedreader
+    privileged: true
+    config:
+      platform: linux
+      image_resource:
+        type: registry-image
+        source:
+          repository: quay.io/buildah/stable
+      inputs:
+      - name: alpine
+      outputs:
+      - name: speedreader
+      run:
+        path: sh
+        args:
+        - -cx
+        - |
+          mkdir rootfs
+          sr=$(buildah from docker-archive:alpine/image)
+          buildah run $sr apk add wget tar netcat-openbsd jq
+          buildah run $sr wget https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz
+          buildah run $sr tar -xvf ookla-speedtest-1.2.0-linux-x86_64.tgz
+          buildah run $sr rm ookla-speedtest-1.2.0-linux-x86_64.tgz
+          buildah run $sr mv speedtest /usr/local/bin
+          m=$(buildah mount $sr)
+          mount -o bind "$m" rootfs
+          cp -r rootfs speedreader
+          umount "$m"
+          buildah umount $sr
+          cp alpine/metadata.json speedreader/metadata.json
+
+  - task: test-speed
+    image: speedreader
+    config:
+      platform: linux
+      outputs:
+      - name: speedresults
+      run:
+        path: sh
+        args:
+        - -cx
+        - |
+          speedtest --accept-license --accept-gdpr --progress=no --format=json > speedresults/results.json
+          time=$(cat speedresults/results.json | jq .timestamp)
+          down=$(cat speedresults/results.json | jq .download.bytes)
+          elapsed=$(cat speedresults/results.json | jq .download.elapsed)
+          downspeed=$(expr "$down" / "$elapsed")
+          echo "alan.internet.downspeed $downspeed `date +%s`" > speedresults/msg.txt
+          nc -Nv metrics 2003 < speedresults/msg.txt
